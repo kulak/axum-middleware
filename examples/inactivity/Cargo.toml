@@ -1,0 +1,16 @@
+[package]
+name = "inactivity"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+anyhow = "1.0.75"
+axum = "0.6.20"
+axum-middleware = { version = "0.1.0", path = "../.." }
+flexi_logger = "0.26.0"
+log = "0.4.20"
+time = "0.3.28"
+tokio = { version = "1.32.0", features = ["rt", "rt-multi-thread", "macros", "signal"] }
+tower = "0.4.13"
