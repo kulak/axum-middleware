@@ -22,13 +22,6 @@ impl JwtValidator {
     }
 }
 
-enum AuthResult {
-    AuthOk(UserId),
-    AuthErr(StatusCode),
-}
-
-use AuthResult::{AuthErr, AuthOk};
-
 impl<B> AsyncAuthorizeRequest<B> for JwtValidator
 where
     B: Send + 'static,
@@ -45,11 +38,11 @@ where
 
         let r = Box::pin(async move {
             match auth_with_remote(cookie_name, validate_url, headers).await {
-                AuthOk(user_id) => {
+                Ok(user_id) => {
                     request.extensions_mut().insert(user_id);
                     Ok(request)
                 }
-                AuthErr(status_code) => {
+                Err(status_code) => {
                     let mut r = Response::default();
                     *r.status_mut() = status_code;
                     Err(r)
@@ -68,7 +61,7 @@ async fn auth_with_remote(
     cookie_name: String,
     validate_url: Uri,
     headers: HeaderMap<HeaderValue>,
-) -> AuthResult {
+) -> Result<UserId, StatusCode> {
     match headers.get(COOKIE) {
         Some(headver_value_wraper) => {
             // extract JWT
@@ -81,28 +74,28 @@ async fn auth_with_remote(
                                 match send_message(validate_url.clone(), cookie).await {
                                     Ok(is_valid) => {
                                         if !is_valid {
-                                            return AuthErr(StatusCode::FORBIDDEN);
+                                            return Err(StatusCode::FORBIDDEN);
                                         }
                                         // extract subject ID as user ID
                                         return get_user_id(jwt);
                                     }
                                     Err(err) => {
                                         error!("failed to authenticate with gateway: {}", err);
-                                        return AuthErr(StatusCode::BAD_GATEWAY);
+                                        return Err(StatusCode::BAD_GATEWAY);
                                     }
                                 }
                             }
                         }
                     }
-                    return AuthErr(StatusCode::UNAUTHORIZED);
+                    return Err(StatusCode::UNAUTHORIZED);
                 }
                 _ => {
-                    return AuthErr(StatusCode::BAD_REQUEST);
+                    return Err(StatusCode::BAD_REQUEST);
                 }
             }
         }
         _ => {
-            return AuthErr(StatusCode::UNAUTHORIZED);
+            return Err(StatusCode::UNAUTHORIZED);
         }
     }
 }
@@ -117,19 +110,19 @@ async fn send_message(url: Uri, cookie: &str) -> Result<bool, anyhow::Error> {
     Ok(resp.status() == StatusCode::OK)
 }
 
-fn get_user_id(jwt_str: &str) -> AuthResult {
+fn get_user_id(jwt_str: &str) -> Result<UserId, StatusCode> {
     match jwt::Token::<jwt::Header, jwt::RegisteredClaims, _>::parse_unverified(jwt_str) {
         Ok(jwt) => {
             if let Some(subject) = jwt.claims().subject.clone() {
-                AuthOk(UserId(subject))
+                Ok(UserId(subject))
             } else {
                 trace!("JWT without sub: {}", jwt_str);
-                AuthErr(StatusCode::BAD_REQUEST)
+                Err(StatusCode::BAD_REQUEST)
             }
         }
         Err(err) => {
             trace!("JWT failed to parse: {}, jwt: {}", err, jwt_str);
-            AuthErr(StatusCode::BAD_REQUEST)
+            Err(StatusCode::BAD_REQUEST)
         }
     }
 }
