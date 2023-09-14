@@ -1,6 +1,2 @@
 {
-    "rust-analyzer.linkedProjects": [
-        "./examples/inactivity/Cargo.toml",
-        "./examples/jwt-auth-delegate/Cargo.toml"
-    ]
 }

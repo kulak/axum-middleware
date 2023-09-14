@@ -1,117 +1,135 @@
-use http::{header, Request, Response, StatusCode};
-use http_body::Body;
-use log::{error, warn};
-use std::{fmt, marker::PhantomData};
+use futures_util::future::BoxFuture;
+use http::{
+    header::COOKIE,
+    HeaderMap, HeaderValue, Request, Response, StatusCode, Uri,
+};
+use http_body::combinators::UnsyncBoxBody;
+use log::{error, trace};
+use tower_http::auth::AsyncAuthorizeRequest;
 
-use tower_http::validate_request::ValidateRequest;
-
-pub struct JwtValidator<ResBody> {
+#[derive(Clone)]
+pub struct JwtValidator {
     cookie_name: String,
-    validate_url: String,
-    _ty: PhantomData<fn() -> ResBody>,
+    validate_url: Uri,
 }
 
-impl<ResBody> JwtValidator<ResBody> {
-    pub fn new(cookie_name: String, validate_url: String) -> Self
-    where
-        ResBody: Body + Default,
-    {
+impl JwtValidator {
+    pub fn new(cookie_name: String, validate_url: Uri) -> Self {
         Self {
             cookie_name: cookie_name,
             validate_url: validate_url,
-            _ty: PhantomData,
-        }
-    }
-
-    fn send_message(&self, cookie: &str) -> Result<bool, anyhow::Error> {
-        let response = ureq::get(self.validate_url.as_str())
-            .set("Cookie", cookie)
-            .call()?;
-        Ok(response.status() == 200)
-    }
-}
-
-impl<ResBody> Clone for JwtValidator<ResBody> {
-    fn clone(&self) -> Self {
-        Self {
-            cookie_name: self.cookie_name.clone(),
-            validate_url: self.validate_url.clone(),
-            _ty: PhantomData,
         }
     }
 }
 
-impl<ResBody> fmt::Debug for JwtValidator<ResBody> {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("JwtBearer")
-            .field("header_value", &self.cookie_name.as_str())
-            .finish()
-    }
+enum AuthResult {
+    AuthOk(UserId),
+    AuthErr(StatusCode),
 }
 
-impl<B, ResBody> ValidateRequest<B> for JwtValidator<ResBody>
+use AuthResult::{AuthErr, AuthOk};
+
+impl<B> AsyncAuthorizeRequest<B> for JwtValidator
 where
-    ResBody: Body + Default,
+    B: Send + 'static,
 {
-    type ResponseBody = ResBody;
+    type RequestBody = B;
+    // ResponseBody type is set by AsyncRequireAuthorizationLayer, can't change it.
+    type ResponseBody = UnsyncBoxBody<axum::body::Bytes, axum::Error>;
+    type Future = BoxFuture<'static, Result<Request<B>, Response<Self::ResponseBody>>>;
 
-    fn validate(&mut self, request: &mut Request<B>) -> Result<(), Response<Self::ResponseBody>> {
-        match request.headers().get(header::COOKIE) {
-            Some(headver_value_wraper) => {
-                // extract JWT
+    fn authorize(&mut self, mut request: Request<B>) -> Self::Future {
+        let cookie_name = self.cookie_name.clone();
+        let validate_url = self.validate_url.clone();
+        let headers = request.headers().clone();
 
-                match headver_value_wraper.to_str() {
-                    Ok(header_value) => {
-                        for cookie in header_value.to_string().split(';') {
-                            // extract cookie name  name=value; expires=; ...
-                            if let Some((req_cookie_name, _)) = cookie.split_once("=") {
-                                if req_cookie_name.eq(self.cookie_name.as_str()) {
-                                    // found JWT coockie
-                                    // send verification request
+        let r = Box::pin(async move {
+            match auth_with_remote(cookie_name, validate_url, headers).await {
+                AuthOk(user_id) => {
+                    request.extensions_mut().insert(user_id);
+                    Ok(request)
+                }
+                AuthErr(status_code) => {
+                    let mut r = Response::default();
+                    *r.status_mut() = status_code;
+                    Err(r)
+                }
+            }
+        });
+        // be a future that resolves to `Result<Request<B>, Response<UnsyncBoxBody<Bytes, Error>>>`
+        r
+    }
+}
 
-                                    match self.send_message(cookie) {
-                                        Err(err) => {
-                                            error!("failed to authenticate with gateway: {}", err);
+#[derive(Debug)]
+pub struct UserId(pub String);
 
-                                            let mut res = Response::new(ResBody::default());
-                                            *res.status_mut() = StatusCode::BAD_GATEWAY;
-                                            return Err(res);
+async fn auth_with_remote(
+    cookie_name: String,
+    validate_url: Uri,
+    headers: HeaderMap<HeaderValue>,
+) -> AuthResult {
+    match headers.get(COOKIE) {
+        Some(headver_value_wraper) => {
+            // extract JWT
+            match headver_value_wraper.to_str() {
+                Ok(header_value) => {
+                    for cookie in header_value.to_string().split(';') {
+                        // extract cookie name  name=value; expires=; ...
+                        if let Some((req_cookie_name, jwt)) = cookie.split_once("=") {
+                            if req_cookie_name.eq(cookie_name.as_str()) {
+                                match send_message(validate_url.clone(), cookie).await {
+                                    Ok(is_valid) => {
+                                        if !is_valid {
+                                            return AuthErr(StatusCode::FORBIDDEN);
                                         }
-                                        Ok(is_valid) => {
-                                            if is_valid {
-                                                return Ok(());
-                                            } else {
-                                                let mut res = Response::new(ResBody::default());
-                                                *res.status_mut() = StatusCode::FORBIDDEN;
-                                                return Err(res);
-                                            }
-                                        }
+                                        // extract subject ID as user ID
+                                        return get_user_id(jwt);
+                                    }
+                                    Err(err) => {
+                                        error!("failed to authenticate with gateway: {}", err);
+                                        return AuthErr(StatusCode::BAD_GATEWAY);
                                     }
                                 }
                             }
                         }
-                        warn!("failed to find JWT cookie");
-
-                        let mut res = Response::new(ResBody::default());
-                        *res.status_mut() = StatusCode::UNAUTHORIZED;
-                        Err(res)
                     }
-                    Err(err) => {
-                        warn!("failed to get cookie value: {}", err);
-
-                        let mut res = Response::new(ResBody::default());
-                        *res.status_mut() = StatusCode::BAD_REQUEST;
-                        Err(res)
-                    }
+                    return AuthErr(StatusCode::UNAUTHORIZED);
+                }
+                _ => {
+                    return AuthErr(StatusCode::BAD_REQUEST);
                 }
             }
-            _ => {
-                warn!("failed to get cookie header");
+        }
+        _ => {
+            return AuthErr(StatusCode::UNAUTHORIZED);
+        }
+    }
+}
 
-                let mut res = Response::new(ResBody::default());
-                *res.status_mut() = StatusCode::UNAUTHORIZED;
-                Err(res)
+async fn send_message(url: Uri, cookie: &str) -> Result<bool, anyhow::Error> {
+    let https = hyper_tls::HttpsConnector::new();
+    let client = hyper::client::Client::builder().build::<_, hyper::Body>(https);
+    let mut req = Request::default();
+    (*req.headers_mut()).insert(COOKIE, HeaderValue::from_str(cookie)?);
+    *req.uri_mut() = url;
+    let resp = client.request(req).await?;
+    Ok(resp.status() == StatusCode::OK)
+}
+
+fn get_user_id(jwt_str: &str) -> AuthResult {
+    match jwt::Token::<jwt::Header, jwt::RegisteredClaims, _>::parse_unverified(jwt_str) {
+        Ok(jwt) => {
+            if let Some(subject) = jwt.claims().subject.clone() {
+                AuthOk(UserId(subject))
+            } else {
+                trace!("JWT without sub: {}", jwt_str);
+                AuthErr(StatusCode::BAD_REQUEST)
             }
+        }
+        Err(err) => {
+            trace!("JWT failed to parse: {}, jwt: {}", err, jwt_str);
+            AuthErr(StatusCode::BAD_REQUEST)
         }
     }
 }

@@ -11,6 +11,8 @@ axum = "0.6.20"
 axum-middleware = { version = "0.1.0", path = "../.." }
 dotenvy = "0.15.7"
 flexi_logger = "0.26.0"
+http = "0.2.9"
+http-body = "0.4.5"
 log = "0.4.20"
 tokio = { version = "1.32.0", features = ["full"] }
 tower = "0.4.13"

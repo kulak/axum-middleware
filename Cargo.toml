@@ -13,10 +13,16 @@ futures-util = "0.3.28"
 http = "0.2.9"
 http-body = "0.4.5"
 hyper = { version = "0.14.27" }
+hyper-tls = "0.5.0"
+jwt = { git = "https://github.com/glimberg/rust-jwt.git", version = "0.16.0" }
 log = "0.4.20"
 time = "0.3.28"
 tokio = { version = "1.32.0", features = ["rt", "rt-multi-thread", "macros", "signal"] }
-tower-http = { version = "0.4.4", features = ["validate-request"] }
+tower = "0.4.13"
+tower-http = { version = "0.4.4", features = ["auth"] }
 tower-layer = "0.3.2"
 tower-service = "0.3.2"
 ureq = "2.7.1"
+
+[workspace]
+members = ["examples/*"]
