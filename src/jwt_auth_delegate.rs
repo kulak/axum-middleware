@@ -54,7 +54,7 @@ where
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct UserId(pub String);
 
 async fn auth_with_remote(

@@ -1,16 +1,14 @@
 use std::env;
 
 use anyhow::{Result, Context};
+use axum::Extension;
 use axum::response::IntoResponse;
 use axum_middleware::jwt_auth_delegate::{self, UserId};
 
-use axum::body::Body;
 use axum::{
-    http::Request,
     routing::{on, MethodFilter},
     Router,
 };
-use http::StatusCode;
 
 use flexi_logger::Logger;
 use jwt_auth_delegate::JwtValidator;
@@ -37,9 +35,6 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn handle(request: Request<Body>) -> impl IntoResponse {
-    if let Some(UserId(user_id)) = request.extensions().get::<UserId>() {
-        return format!("HELLO User ID: {}", user_id).into_response();
-    }
-    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+async fn handle(Extension(UserId(user_id)): Extension<UserId>) -> impl IntoResponse {
+    return format!("HELLO User ID: {}", user_id).into_response();
 }
