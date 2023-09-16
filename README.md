@@ -18,6 +18,8 @@ An example implementation of authentication service conforming to the authentica
 
 User ID for authenticated user is extracted from JWT "sub" field and passed within request processing pipeline as AXUM extension.
 
+JWT subject may contain string or `i32`.  The later is automatically converted to number based type `UserId32`.
+
 ## Examples
 
 Examples directory provides sample applications utilizing the middleware.

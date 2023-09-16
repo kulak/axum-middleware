@@ -3,7 +3,7 @@ use std::env;
 use anyhow::{Result, Context};
 use axum::Extension;
 use axum::response::IntoResponse;
-use axum_middleware::jwt_auth_delegate::{self, UserId};
+use axum_middleware::jwt_auth_delegate::{self, UserId32};
 
 use axum::{
     routing::{on, MethodFilter},
@@ -23,7 +23,7 @@ async fn main() -> Result<()> {
     let cookie_name = env::var("COOKIE_NAME").context("COOKIE_NAME")?;
     let validate_uri = env::var("VALIDATE_URL").context("VALIDATE_URL")?.parse().context("PARSE")?;
 
-    let layer = AsyncRequireAuthorizationLayer::new(JwtValidator::new(cookie_name, validate_uri));
+    let layer = AsyncRequireAuthorizationLayer::new(JwtValidator::<UserId32>::new(cookie_name, validate_uri));
 
     let app = Router::new()
         .route_service("/", on(MethodFilter::GET, handle))
@@ -35,6 +35,6 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-async fn handle(Extension(UserId(user_id)): Extension<UserId>) -> impl IntoResponse {
+async fn handle(Extension(UserId32(user_id)): Extension<UserId32>) -> impl IntoResponse {
     return format!("HELLO User ID: {}", user_id).into_response();
 }

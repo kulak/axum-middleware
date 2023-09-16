@@ -1,3 +1,5 @@
+use std::marker::PhantomData;
+
 use futures_util::future::BoxFuture;
 use http::{
     header::COOKIE,
@@ -7,24 +9,40 @@ use http_body::combinators::UnsyncBoxBody;
 use log::{error, trace};
 use tower_http::auth::AsyncAuthorizeRequest;
 
-#[derive(Clone)]
-pub struct JwtValidator {
-    cookie_name: String,
-    validate_url: Uri,
+pub trait FromJwtSubject
+where 
+    Self: Clone + std::marker::Send + std::marker::Sync + 'static
+{
+    fn from_jwt_sub(jwt_sub: String) -> Result<Self, StatusCode>;
 }
 
-impl JwtValidator {
+#[derive(Clone)]
+pub struct JwtValidator<U> 
+where
+    U: Clone,
+{
+    cookie_name: String,
+    validate_url: Uri,
+    phantom: PhantomData<U>
+}
+
+impl<U> JwtValidator<U> 
+where
+    U: Clone
+{
     pub fn new(cookie_name: String, validate_url: Uri) -> Self {
         Self {
             cookie_name: cookie_name,
             validate_url: validate_url,
+            phantom: PhantomData,
         }
     }
 }
 
-impl<B> AsyncAuthorizeRequest<B> for JwtValidator
+impl<B, U> AsyncAuthorizeRequest<B> for JwtValidator<U>
 where
     B: Send + 'static,
+    U: Clone + std::marker::Send + std::marker::Sync + FromJwtSubject + 'static,
 {
     type RequestBody = B;
     // ResponseBody type is set by AsyncRequireAuthorizationLayer, can't change it.
@@ -37,7 +55,7 @@ where
         let headers = request.headers().clone();
 
         let r = Box::pin(async move {
-            match auth_with_remote(cookie_name, validate_url, headers).await {
+            match auth_with_remote::<U>(cookie_name, validate_url, headers).await {
                 Ok(user_id) => {
                     request.extensions_mut().insert(user_id);
                     Ok(request)
@@ -57,11 +75,33 @@ where
 #[derive(Debug, Clone)]
 pub struct UserId(pub String);
 
-async fn auth_with_remote(
+impl FromJwtSubject for UserId
+{
+    fn from_jwt_sub(jwt_sub: String) -> Result<Self, StatusCode> {
+        Ok(UserId(jwt_sub))
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct UserId32(pub i32);
+
+impl FromJwtSubject for UserId32 {
+    fn from_jwt_sub(jwt_sub: String) -> Result<Self, StatusCode> {
+        match jwt_sub.parse::<i32>() {
+            Ok(num) => Ok(UserId32(num)),
+            Err(_) => Err(StatusCode::BAD_REQUEST),
+        }
+    }
+}
+
+async fn auth_with_remote<U>(
     cookie_name: String,
     validate_url: Uri,
     headers: HeaderMap<HeaderValue>,
-) -> Result<UserId, StatusCode> {
+) -> Result<U, StatusCode> 
+where
+    U: Clone + std::marker::Send + std::marker::Sync + FromJwtSubject + 'static
+{
     match headers.get(COOKIE) {
         Some(headver_value_wraper) => {
             // extract JWT
@@ -77,7 +117,7 @@ async fn auth_with_remote(
                                             return Err(StatusCode::FORBIDDEN);
                                         }
                                         // extract subject ID as user ID
-                                        return get_user_id(jwt);
+                                        return get_user_id::<U>(jwt);
                                     }
                                     Err(err) => {
                                         error!("failed to authenticate with gateway: {}", err);
@@ -110,11 +150,14 @@ async fn send_message(url: Uri, cookie: &str) -> Result<bool, anyhow::Error> {
     Ok(resp.status() == StatusCode::OK)
 }
 
-fn get_user_id(jwt_str: &str) -> Result<UserId, StatusCode> {
+fn get_user_id<U>(jwt_str: &str) -> Result<U, StatusCode> 
+where
+    U: Clone + std::marker::Send + std::marker::Sync + FromJwtSubject + 'static,
+{
     match jwt::Token::<jwt::Header, jwt::RegisteredClaims, _>::parse_unverified(jwt_str) {
         Ok(jwt) => {
             if let Some(subject) = jwt.claims().subject.clone() {
-                Ok(UserId(subject))
+                U::from_jwt_sub(subject)
             } else {
                 trace!("JWT without sub: {}", jwt_str);
                 Err(StatusCode::BAD_REQUEST)
